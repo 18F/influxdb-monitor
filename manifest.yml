@@ -1,0 +1,6 @@
+---
+applications:
+- name: influxdb-monitor
+  command: influxdb-monitor
+  health-check-type: none
+  no-route: true

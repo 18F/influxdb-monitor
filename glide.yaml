@@ -1,0 +1,11 @@
+package: github.com/18F/influxdb-monitor
+import:
+- package: github.com/amir/raidman
+- package: github.com/influxdata/influxdb
+  version: ~1.0.2
+  subpackages:
+  - client/v2
+  - models
+- package: github.com/robfig/cron
+  version: ~1.0.0
+- package: gopkg.in/yaml.v2
