@@ -1,10 +1,6 @@
 ---
 tasks:
-- service: monitor.uaa.audit_service.user_authentication_failure_count.current
-  command: select sum(value) as metric from "cf.uaa.audit_service.user_authentication_failure_count" where time >= now() - 1d
-  schedule: "0 * * * * *"
-  ttl: 3600
-- service: monitor.uaa.audit_service.user_authentication_failure_count.baseline
-  command: select sum(value) as metric from "cf.uaa.audit_service.user_authentication_failure_count" where now() - 2d <= time and time < now() - 1d
-  schedule: "0 * * * * *"
+- service: monitor.uaa.audit_service.user_authentication_failure_count
+  command: select sum(value) as metric from "cf.uaa.audit_service.user_authentication_failure_count" where time >= now() - 14d group by time(1d)
+  schedule: "0 0 * * * *"
   ttl: 3600

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"time"
 
 	"github.com/amir/raidman"
 	"github.com/influxdata/influxdb/client/v2"
@@ -34,9 +35,6 @@ func main() {
 	})
 	fatal(err)
 
-	riemann, err := raidman.Dial("tcp", os.Getenv("RIEMANN_ADDRESS"))
-	fatal(err)
-
 	raw, err := ioutil.ReadFile("config.yml")
 	fatal(err)
 
@@ -48,7 +46,7 @@ func main() {
 
 	for _, task := range config.Tasks {
 		log.Printf("Registering task: %s", task.Service)
-		registerTask(schedule, influx, riemann, task)
+		registerTask(schedule, influx, task)
 	}
 
 	schedule.Start()
@@ -62,8 +60,14 @@ func fatal(err error) {
 	}
 }
 
-func registerTask(schedule *cron.Cron, influx client.Client, riemann *raidman.Client, task Task) {
+func registerTask(schedule *cron.Cron, influx client.Client, task Task) {
 	schedule.AddFunc(task.Schedule, func() {
+		riemann, err := raidman.Dial("tcp", os.Getenv("RIEMANN_ADDRESS"))
+		if err != nil {
+			log.Printf("Error: %s", err)
+			return
+		}
+
 		query := client.Query{
 			Command:  task.Command,
 			Database: os.Getenv("INFLUX_DATABASE"),
@@ -74,14 +78,18 @@ func registerTask(schedule *cron.Cron, influx client.Client, riemann *raidman.Cl
 			return
 		}
 
+		batch := time.Now().String()
+
 		events := []*raidman.Event{}
 		for _, result := range results {
 			for _, row := range result.Series {
 				for _, value := range row.Values {
-					metric, attributes := formatValue(row, value)
+					timestamp, metric, attributes := formatValue(row, value)
+					attributes["batch"] = batch
 					log.Printf("metric: %v", metric)
 					log.Printf("attributes: %v", attributes)
 					events = append(events, &raidman.Event{
+						Time:       timestamp,
 						Metric:     metric,
 						Attributes: attributes,
 						Service:    task.Service,
@@ -100,11 +108,19 @@ func registerTask(schedule *cron.Cron, influx client.Client, riemann *raidman.Cl
 	})
 }
 
-func formatValue(row models.Row, value []interface{}) (interface{}, map[string]string) {
+func formatValue(row models.Row, value []interface{}) (int64, interface{}, map[string]string) {
+	var timestamp int64
 	var metric interface{}
 	attributes := map[string]string{}
 	for idx, name := range row.Columns {
-		if name == "metric" {
+		if name == "time" {
+			parsed, err := parseTime(value[idx])
+			if err == nil {
+				timestamp = parsed
+			} else {
+				attributes[name] = fmt.Sprintf("%v", value[idx])
+			}
+		} else if name == "metric" {
 			parsed, err := parseMetric(value[idx])
 			if err == nil {
 				metric = parsed
@@ -115,7 +131,7 @@ func formatValue(row models.Row, value []interface{}) (interface{}, map[string]s
 			attributes[name] = fmt.Sprintf("%v", value[idx])
 		}
 	}
-	return metric, attributes
+	return timestamp, metric, attributes
 }
 
 func parseMetric(value interface{}) (interface{}, error) {
@@ -124,6 +140,19 @@ func parseMetric(value interface{}) (interface{}, error) {
 		return value.(json.Number).Float64()
 	default:
 		return nil, fmt.Errorf("Value %v has wrong type", value)
+	}
+}
+
+func parseTime(value interface{}) (int64, error) {
+	switch value.(type) {
+	case string:
+		parsed, err := time.Parse(time.RFC3339, value.(string))
+		if err != nil {
+			return 0.0, err
+		}
+		return parsed.Unix(), nil
+	default:
+		return 0.0, fmt.Errorf("Value %v has wrong type", value)
 	}
 }
 
