@@ -28,10 +28,51 @@ type Config struct {
 func main() {
 	schedule := cron.New()
 
-	schedule.AddFunc("0 * * * * *", CheckUAABadLogins)
+	registerDerivativeAggregator(
+		schedule,
+		"0 * * * * *",
+		`select derivative(mean(value), 1m) from "cf.uaa.audit_service.user_authentication_failure_count" where time >= now() - 15d group by time(1m), "job"`,
+		"monitor.uaa.audit_service.user_authentication_failure_count.stddevs",
+	)
+	registerDerivativeAggregator(
+		schedule,
+		"0 * * * * *",
+		`select derivative(mean(value), 1m) from "cf.uaa.audit_service.user_not_found_count" where time >= now() - 15d group by time(1m), "job"`,
+		"monitor.uaa.audit_service.user_not_found_count.stddevs",
+	)
+	registerDerivativeAggregator(
+		schedule,
+		"0 * * * * *",
+		`select derivative(mean(value), 1m) from "cf.uaa.audit_service.user_password_changes" where time >= now() - 15d group by time(1m), "job"`,
+		"monitor.uaa.audit_service.user_password_changes.stddevs",
+	)
+	registerDerivativeAggregator(
+		schedule,
+		"0 * * * * *",
+		`select derivative(mean(value), 1m) from "cf.cc.http_status.4XX" where time >= now() - 15d group by time(1m), "index", "ip", "job"`,
+		"monitor.cc.http_status.4xx.stddevs",
+	)
+	registerDerivativeAggregator(
+		schedule,
+		"0 * * * * *",
+		`select derivative(mean(value), 1m) from "cf.cc.http_status.5XX" where time >= now() - 15d group by time(1m), "index", "ip", "job"`,
+		"monitor.cc.http_status.5xx.stddevs",
+	)
+
+	registerAggregator(
+		schedule,
+		"0 * * * * *",
+		`select mean(value) from "cf.bbs.LRPsRunning" where time >= now() - 15d and time < now() group by time(1d, now())`,
+		"monitor.bbs.LRPsRunning.stddevs",
+	)
+	registerAggregator(
+		schedule,
+		"0 * * * * *",
+		`select mean(value) from "cf.bbs.TasksRunning" where time >= now() - 15d and time < now() group by time(1d, now())`,
+		"monitor.bbs.TasksRunning.stddevs",
+	)
 
 	schedule.Start()
-
 	waitForExit()
 }
 
@@ -49,70 +90,154 @@ func (p TimeSlice) Swap(i, j int) {
 	p[i], p[j] = p[j], p[i]
 }
 
-func CheckUAABadLogins() {
-	riemann, err := raidman.Dial("tcp", os.Getenv("RIEMANN_ADDRESS"))
-	if err != nil {
-		log.Printf("Error: %s", err)
-		return
-	}
+func registerDerivativeAggregator(
+	schedule *cron.Cron,
+	spec string,
+	command string,
+	service string,
+) {
+	schedule.AddFunc(spec, func() {
+		riemann, err := raidman.Dial("tcp", os.Getenv("RIEMANN_ADDRESS"))
+		if err != nil {
+			log.Printf("Error: %s", err)
+			return
+		}
 
-	influx, err := client.NewHTTPClient(client.HTTPConfig{
-		Addr:     os.Getenv("INFLUX_ADDRESS"),
-		Username: os.Getenv("INFLUX_USERNAME"),
-		Password: os.Getenv("INFLUX_PASSWORD"),
+		influx, err := client.NewHTTPClient(client.HTTPConfig{
+			Addr:     os.Getenv("INFLUX_ADDRESS"),
+			Username: os.Getenv("INFLUX_USERNAME"),
+			Password: os.Getenv("INFLUX_PASSWORD"),
+		})
+		if err != nil {
+			log.Printf("Error: %s", err)
+			return
+		}
+
+		query := client.Query{
+			Command:  command,
+			Database: os.Getenv("INFLUX_DATABASE"),
+		}
+		results, err := fetch(influx, query)
+		if err != nil {
+			log.Printf("Error: %s", err)
+			return
+		}
+
+		now := time.Now()
+		offset := now.Sub(now.Truncate(24 * time.Hour))
+
+		days := []time.Time{}
+		buckets := map[time.Time]float64{}
+		for _, series := range results[0].Series {
+			for _, value := range series.Values {
+				delta, _ := value[1].(json.Number).Float64()
+				timestamp, _ := time.Parse(time.RFC3339, value[0].(string))
+				day := timestamp.Add(offset).Truncate(24 * time.Hour)
+				if _, ok := buckets[day]; !ok {
+					buckets[day] = 0.0
+					days = append(days, day)
+				}
+				if delta > 0.0 {
+					buckets[day] = buckets[day] + delta
+				}
+			}
+		}
+
+		log.Printf("Buckets: %v", buckets)
+
+		sort.Sort(TimeSlice(days))
+
+		totals := []float64{}
+		for _, day := range days[:len(days)-2] {
+			totals = append(totals, buckets[day])
+		}
+
+		mean, _ := stats.Mean(totals[0:])
+		stddev, _ := stats.StandardDeviationSample(totals)
+		metric := (buckets[days[len(days)-1]] - mean) / stddev
+
+		log.Printf("Service: %s", service)
+		log.Printf("Mean: %f", mean)
+		log.Printf("Stddev: %f", stddev)
+		log.Printf("Value: %f", (buckets[days[len(days)-1]]-mean)/stddev)
+
+		riemann.Send(&raidman.Event{
+			Time:    now.Unix(),
+			Service: service,
+			Metric:  metric,
+		})
 	})
-	if err != nil {
-		log.Printf("Error: %s", err)
-		return
-	}
+}
 
-	query := client.Query{
-		Command:  `select derivative(mean(value), 1m) from "cf.uaa.audit_service.user_authentication_failure_count" where time >= now() - 15d group by time(1m), "job"`,
-		Database: os.Getenv("INFLUX_DATABASE"),
-	}
-	results, err := fetch(influx, query)
-	if err != nil {
-		log.Printf("Error: %s", err)
-		return
-	}
-
-	now := time.Now()
-	offset := now.Sub(now.Truncate(24 * time.Hour))
-
-	days := []time.Time{}
-	buckets := map[time.Time]float64{}
-	for _, value := range results[0].Series[0].Values {
-		delta, _ := value[1].(json.Number).Float64()
-		timestamp, _ := time.Parse(time.RFC3339, value[0].(string))
-		day := timestamp.Add(offset).Truncate(24 * time.Hour)
-		if _, ok := buckets[day]; !ok {
-			buckets[day] = 0.0
-			days = append(days, day)
+func registerAggregator(
+	schedule *cron.Cron,
+	spec string,
+	command string,
+	service string,
+) {
+	schedule.AddFunc(spec, func() {
+		riemann, err := raidman.Dial("tcp", os.Getenv("RIEMANN_ADDRESS"))
+		if err != nil {
+			log.Printf("Error: %s", err)
+			return
 		}
-		if delta > 0.0 {
-			buckets[day] = buckets[day] + delta
+
+		influx, err := client.NewHTTPClient(client.HTTPConfig{
+			Addr:     os.Getenv("INFLUX_ADDRESS"),
+			Username: os.Getenv("INFLUX_USERNAME"),
+			Password: os.Getenv("INFLUX_PASSWORD"),
+		})
+		if err != nil {
+			log.Printf("Error: %s", err)
+			return
 		}
-	}
 
-	sort.Sort(TimeSlice(days))
+		query := client.Query{
+			Command:  command,
+			Database: os.Getenv("INFLUX_DATABASE"),
+		}
+		results, err := fetch(influx, query)
+		if err != nil {
+			log.Printf("Error: %s", err)
+			return
+		}
 
-	totals := []float64{}
-	for _, day := range days[:len(days)-2] {
-		totals = append(totals, buckets[day])
-	}
+		now := time.Now()
 
-	mean, _ := stats.Mean(totals[0:])
-	stddev, _ := stats.StandardDeviationSample(totals)
-	metric := (buckets[days[len(days)-1]] - mean) / stddev
+		days := []time.Time{}
+		buckets := map[time.Time]float64{}
+		for _, series := range results[0].Series {
+			for _, value := range series.Values {
+				metric, _ := value[1].(json.Number).Float64()
+				timestamp, _ := time.Parse(time.RFC3339, value[0].(string))
+				buckets[timestamp] = metric
+				days = append(days, timestamp)
+			}
+		}
 
-	log.Printf("Mean: %f", mean)
-	log.Printf("Stddev: %f", stddev)
-	log.Printf("Value: %f", (buckets[days[len(days)-1]]-mean)/stddev)
+		log.Printf("Buckets: %v", buckets)
 
-	riemann.Send(&raidman.Event{
-		Time:    now.Unix(),
-		Service: "monitor.uaa.audit_service.user_authentication_failure_count.stddevs",
-		Metric:  metric,
+		sort.Sort(TimeSlice(days))
+
+		totals := []float64{}
+		for _, day := range days[:len(days)-2] {
+			totals = append(totals, buckets[day])
+		}
+
+		mean, _ := stats.Mean(totals[0:])
+		stddev, _ := stats.StandardDeviationSample(totals)
+		metric := (buckets[days[len(days)-1]] - mean) / stddev
+
+		log.Printf("Service: %s", service)
+		log.Printf("Mean: %f", mean)
+		log.Printf("Stddev: %f", stddev)
+		log.Printf("Value: %f", (buckets[days[len(days)-1]]-mean)/stddev)
+
+		riemann.Send(&raidman.Event{
+			Time:    now.Unix(),
+			Service: service,
+			Metric:  metric,
+		})
 	})
 }
 
