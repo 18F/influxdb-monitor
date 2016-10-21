@@ -1,5 +1,5 @@
-hash: 141817aa95a0d2c0c48fbaca4c8d17b4fb159e4202e47018f51de881e90b28b2
-updated: 2016-10-19T23:51:42.035538607-04:00
+hash: 330adc9e0cccc51f882492eb214374741a3612610b2612fc8bfe3aadaae653fd
+updated: 2016-10-21T14:27:44.064295452-04:00
 imports:
 - name: github.com/amir/raidman
   version: c74861fe6a7bb8ede0a010ce4485bdbb4fc4c985
@@ -15,12 +15,12 @@ imports:
   - client/v2
   - models
   - pkg/escape
+- name: github.com/montanaflynn/stats
+  version: eeaced052adbcfeea372c749c281099ed7fdaa38
 - name: github.com/robfig/cron
   version: b024fc5ea0e34bc3f83d9941c8d60b0622bfaca4
 - name: golang.org/x/net
   version: 3bafa3320efdf0c95d056586aa9abdd05ad72ee1
   subpackages:
   - proxy
-- name: gopkg.in/yaml.v2
-  version: e4d366fc3c7938e2958e662b4258c7a89e1f0e3e
 testImports: []
