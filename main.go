@@ -2,18 +2,16 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/signal"
+	"sort"
 	"time"
 
 	"github.com/amir/raidman"
 	"github.com/influxdata/influxdb/client/v2"
-	"github.com/influxdata/influxdb/models"
+	"github.com/montanaflynn/stats"
 	"github.com/robfig/cron"
-	"gopkg.in/yaml.v2"
 )
 
 type Task struct {
@@ -28,132 +26,94 @@ type Config struct {
 }
 
 func main() {
-	influx, err := client.NewHTTPClient(client.HTTPConfig{
-		Addr:     os.Getenv("INFLUX_ADDRESS"),
-		Username: os.Getenv("INFLUX_USERNAME"),
-		Password: os.Getenv("INFLUX_PASSWORD"),
-	})
-	fatal(err)
-
-	raw, err := ioutil.ReadFile("config.yml")
-	fatal(err)
-
-	config := Config{}
-	err = yaml.Unmarshal(raw, &config)
-	fatal(err)
-
 	schedule := cron.New()
 
-	for _, task := range config.Tasks {
-		log.Printf("Registering task: %s", task.Service)
-		registerTask(schedule, influx, task)
-	}
+	schedule.AddFunc("0 * * * * *", CheckUAABadLogins)
 
 	schedule.Start()
 
 	waitForExit()
 }
 
-func fatal(err error) {
+type TimeSlice []time.Time
+
+func (p TimeSlice) Len() int {
+	return len(p)
+}
+
+func (p TimeSlice) Less(i, j int) bool {
+	return p[i].Before(p[j])
+}
+
+func (p TimeSlice) Swap(i, j int) {
+	p[i], p[j] = p[j], p[i]
+}
+
+func CheckUAABadLogins() {
+	riemann, err := raidman.Dial("tcp", os.Getenv("RIEMANN_ADDRESS"))
 	if err != nil {
-		log.Fatalf("Error: %s", err)
+		log.Printf("Error: %s", err)
+		return
 	}
-}
 
-func registerTask(schedule *cron.Cron, influx client.Client, task Task) {
-	schedule.AddFunc(task.Schedule, func() {
-		riemann, err := raidman.Dial("tcp", os.Getenv("RIEMANN_ADDRESS"))
-		if err != nil {
-			log.Printf("Error: %s", err)
-			return
-		}
-
-		query := client.Query{
-			Command:  task.Command,
-			Database: os.Getenv("INFLUX_DATABASE"),
-		}
-		results, err := fetch(influx, query)
-		if err != nil {
-			log.Printf("Error: %s", err)
-			return
-		}
-
-		batch := time.Now().String()
-
-		events := []*raidman.Event{}
-		for _, result := range results {
-			for _, row := range result.Series {
-				for _, value := range row.Values {
-					timestamp, metric, attributes := formatValue(row, value)
-					attributes["batch"] = batch
-					log.Printf("metric: %v", metric)
-					log.Printf("attributes: %v", attributes)
-					events = append(events, &raidman.Event{
-						Time:       timestamp,
-						Metric:     metric,
-						Attributes: attributes,
-						Service:    task.Service,
-						Ttl:        task.Ttl,
-					})
-				}
-			}
-		}
-
-		err = riemann.SendMulti(events)
-		if err != nil {
-			log.Printf("Error: %s", err)
-		}
-
-		log.Printf("Emitted %d events", len(events))
+	influx, err := client.NewHTTPClient(client.HTTPConfig{
+		Addr:     os.Getenv("INFLUX_ADDRESS"),
+		Username: os.Getenv("INFLUX_USERNAME"),
+		Password: os.Getenv("INFLUX_PASSWORD"),
 	})
-}
+	if err != nil {
+		log.Printf("Error: %s", err)
+		return
+	}
 
-func formatValue(row models.Row, value []interface{}) (int64, interface{}, map[string]string) {
-	var timestamp int64
-	var metric interface{}
-	attributes := map[string]string{}
-	for idx, name := range row.Columns {
-		if name == "time" {
-			parsed, err := parseTime(value[idx])
-			if err == nil {
-				timestamp = parsed
-			} else {
-				attributes[name] = fmt.Sprintf("%v", value[idx])
-			}
-		} else if name == "metric" {
-			parsed, err := parseMetric(value[idx])
-			if err == nil {
-				metric = parsed
-			} else {
-				attributes[name] = fmt.Sprintf("%v", value[idx])
-			}
-		} else {
-			attributes[name] = fmt.Sprintf("%v", value[idx])
+	query := client.Query{
+		Command:  `select derivative(mean(value), 1m) from "cf.uaa.audit_service.user_authentication_failure_count" where time >= now() - 15d group by time(1m), "job"`,
+		Database: os.Getenv("INFLUX_DATABASE"),
+	}
+	results, err := fetch(influx, query)
+	if err != nil {
+		log.Printf("Error: %s", err)
+		return
+	}
+
+	now := time.Now()
+	offset := now.Sub(now.Truncate(24 * time.Hour))
+
+	days := []time.Time{}
+	buckets := map[time.Time]float64{}
+	for _, value := range results[0].Series[0].Values {
+		delta, _ := value[1].(json.Number).Float64()
+		timestamp, _ := time.Parse(time.RFC3339, value[0].(string))
+		day := timestamp.Add(offset).Truncate(24 * time.Hour)
+		if _, ok := buckets[day]; !ok {
+			buckets[day] = 0.0
+			days = append(days, day)
+		}
+		if delta > 0.0 {
+			buckets[day] = buckets[day] + delta
 		}
 	}
-	return timestamp, metric, attributes
-}
 
-func parseMetric(value interface{}) (interface{}, error) {
-	switch value.(type) {
-	case json.Number:
-		return value.(json.Number).Float64()
-	default:
-		return nil, fmt.Errorf("Value %v has wrong type", value)
-	}
-}
+	sort.Sort(TimeSlice(days))
 
-func parseTime(value interface{}) (int64, error) {
-	switch value.(type) {
-	case string:
-		parsed, err := time.Parse(time.RFC3339, value.(string))
-		if err != nil {
-			return 0.0, err
-		}
-		return parsed.Unix(), nil
-	default:
-		return 0.0, fmt.Errorf("Value %v has wrong type", value)
+	totals := []float64{}
+	for _, day := range days[:len(days)-2] {
+		totals = append(totals, buckets[day])
 	}
+
+	mean, _ := stats.Mean(totals[0:])
+	stddev, _ := stats.StandardDeviationSample(totals)
+	metric := (buckets[days[len(days)-1]] - mean) / stddev
+
+	log.Printf("Mean: %f", mean)
+	log.Printf("Stddev: %f", stddev)
+	log.Printf("Value: %f", (buckets[days[len(days)-1]]-mean)/stddev)
+
+	riemann.Send(&raidman.Event{
+		Time:    now.Unix(),
+		Service: "monitor.uaa.audit_service.user_authentication_failure_count.stddevs",
+		Metric:  metric,
+	})
 }
 
 func fetch(c client.Client, q client.Query) ([]client.Result, error) {

@@ -1,6 +1,0 @@
----
-tasks:
-- service: monitor.uaa.audit_service.user_authentication_failure_count
-  command: select sum(value) as metric from "cf.uaa.audit_service.user_authentication_failure_count" where time >= now() - 15d group by time(1d, now())
-  schedule: "0 0 * * * *"
-  ttl: 3600
