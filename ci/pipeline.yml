@@ -1,0 +1,106 @@
+---
+jobs:
+- name: deploy-influxdb-monitor-staging
+  plan:
+  - get: influxdb-monitor-src
+    trigger: true
+  - put: influxdb-monitor-deploy-staging
+    params:
+      path: influxdb-monitor-src
+      manifest: influxdb-monitor-src/manifest.yml
+      current_app_name: influxdb-monitor
+      environment_variables:
+        INFLUX_ADDRESS: {{influx-address-staging}}
+        INFLUX_USERNAME: {{influx-username-staging}}
+        INFLUX_PASSWORD: {{influx-password-staging}}
+        INFLUX_DATABASE: {{influx-database-staging}}
+        RIEMANN_ADDRESS: {{riemann-address-staging}}
+    on_failure:
+      put: slack
+      params:
+        text: |
+          :x: FAILED to deploy influxdb-monitor on staging
+          <$ATC_EXTERNAL_URL/teams/$BUILD_TEAM_NAME/pipelines/$BUILD_PIPELINE_NAME/jobs/$BUILD_JOB_NAME/builds/$BUILD_NAME|View build details>
+        channel: {{slack-channel}}
+        username: {{slack-username}}
+        icon_url: {{slack-icon-url}}
+    on_success:
+      put: slack
+      params:
+        text: |
+          :white_check_mark: Successfully deployed influxdb-monitor on staging
+          <$ATC_EXTERNAL_URL/teams/$BUILD_TEAM_NAME/pipelines/$BUILD_PIPELINE_NAME/jobs/$BUILD_JOB_NAME/builds/$BUILD_NAME|View build details>
+        channel: {{slack-channel}}
+        username: {{slack-username}}
+        icon_url: {{slack-icon-url}}
+
+- name: deploy-influxdb-monitor-production
+  plan:
+  - get: influxdb-monitor-src
+    passed: [deploy-influxdb-monitor-staging]
+    trigger: true
+  - put: influxdb-monitor-deploy-production
+    params:
+      path: influxdb-monitor-src
+      manifest: influxdb-monitor-src/manifest.yml
+      current_app_name: influxdb-monitor
+      environment_variables:
+        INFLUX_ADDRESS: {{influx-address-production}}
+        INFLUX_USERNAME: {{influx-username-production}}
+        INFLUX_PASSWORD: {{influx-password-production}}
+        INFLUX_DATABASE: {{influx-database-production}}
+        RIEMANN_ADDRESS: {{riemann-address-production}}
+    on_failure:
+      put: slack
+      params:
+        text: |
+          :x: FAILED to deploy influxdb-monitor on production
+          <$ATC_EXTERNAL_URL/teams/$BUILD_TEAM_NAME/pipelines/$BUILD_PIPELINE_NAME/jobs/$BUILD_JOB_NAME/builds/$BUILD_NAME|View build details>
+        channel: {{slack-channel}}
+        username: {{slack-username}}
+        icon_url: {{slack-icon-url}}
+    on_success:
+      put: slack
+      params:
+        text: |
+          :white_check_mark: Successfully deployed influxdb-monitor on production
+          <$ATC_EXTERNAL_URL/teams/$BUILD_TEAM_NAME/pipelines/$BUILD_PIPELINE_NAME/jobs/$BUILD_JOB_NAME/builds/$BUILD_NAME|View build details>
+        channel: {{slack-channel}}
+        username: {{slack-username}}
+        icon_url: {{slack-icon-url}}
+
+resources:
+- name: influxdb-monitor-src
+  type: git
+  source:
+    uri: {{influxdb-monitor-git-url}}
+    branch: {{influxdb-monitor-git-branch}}
+
+- name: influxdb-monitor-deploy-staging
+  type: cf
+  source:
+    api: {{cf-api-url-staging}}
+    username: {{cf-deploy-username-staging}}
+    password: {{cf-deploy-password-staging}}
+    organization: {{cf-organization-staging}}
+    space: {{cf-space-staging}}
+
+- name: influxdb-monitor-deploy-production
+  type: cf
+  source:
+    api: {{cf-api-url-production}}
+    username: {{cf-deploy-username-production}}
+    password: {{cf-deploy-password-production}}
+    organization: {{cf-organization-production}}
+    space: {{cf-space-production}}
+
+- name: slack
+  type: slack-notification
+  source:
+    url: {{slack-webhook-url}}
+
+resource_types:
+- name: slack-notification
+  type: docker-image
+  source:
+    repository: cfcommunity/slack-notification-resource
