@@ -14,62 +14,58 @@ import (
 	"github.com/robfig/cron"
 )
 
-type Task struct {
-	Service  string
-	Command  string
-	Schedule string
-	Ttl      float32
-}
-
-type Config struct {
-	Tasks []Task
-}
-
 func main() {
 	schedule := cron.New()
 
 	registerDerivativeAggregator(
 		schedule,
-		"0 * * * * *",
+		"0 0 * * * *",
 		`select derivative(mean(value), 1m) from "cf.uaa.audit_service.user_authentication_failure_count" where time >= now() - 15d group by time(1m), "job"`,
 		"monitor.uaa.audit_service.user_authentication_failure_count.stddevs",
+		2*60*60,
 	)
 	registerDerivativeAggregator(
 		schedule,
-		"0 * * * * *",
+		"0 0 * * * *",
 		`select derivative(mean(value), 1m) from "cf.uaa.audit_service.user_not_found_count" where time >= now() - 15d group by time(1m), "job"`,
 		"monitor.uaa.audit_service.user_not_found_count.stddevs",
+		2*60*60,
 	)
 	registerDerivativeAggregator(
 		schedule,
-		"0 * * * * *",
+		"0 0 * * * *",
 		`select derivative(mean(value), 1m) from "cf.uaa.audit_service.user_password_changes" where time >= now() - 15d group by time(1m), "job"`,
 		"monitor.uaa.audit_service.user_password_changes.stddevs",
+		2*60*60,
 	)
 	registerDerivativeAggregator(
 		schedule,
-		"0 * * * * *",
+		"0 0 * * * *",
 		`select derivative(mean(value), 1m) from "cf.cc.http_status.4XX" where time >= now() - 15d group by time(1m), "index", "ip", "job"`,
 		"monitor.cc.http_status.4xx.stddevs",
+		2*60*60,
 	)
 	registerDerivativeAggregator(
 		schedule,
-		"0 * * * * *",
+		"0 0 * * * *",
 		`select derivative(mean(value), 1m) from "cf.cc.http_status.5XX" where time >= now() - 15d group by time(1m), "index", "ip", "job"`,
 		"monitor.cc.http_status.5xx.stddevs",
+		2*60*60,
 	)
 
 	registerAggregator(
 		schedule,
-		"0 * * * * *",
+		"0 0 * * * *",
 		`select mean(value) from "cf.bbs.LRPsRunning" where time >= now() - 15d and time < now() group by time(1d, now())`,
 		"monitor.bbs.LRPsRunning.stddevs",
+		2*60*60,
 	)
 	registerAggregator(
 		schedule,
-		"0 * * * * *",
+		"0 0 * * * *",
 		`select mean(value) from "cf.bbs.TasksRunning" where time >= now() - 15d and time < now() group by time(1d, now())`,
 		"monitor.bbs.TasksRunning.stddevs",
+		2*60*60,
 	)
 
 	schedule.Start()
@@ -95,6 +91,7 @@ func registerDerivativeAggregator(
 	spec string,
 	command string,
 	service string,
+	ttl float32,
 ) {
 	schedule.AddFunc(spec, func() {
 		riemann, err := raidman.Dial("tcp", os.Getenv("RIEMANN_ADDRESS"))
@@ -161,11 +158,15 @@ func registerDerivativeAggregator(
 		log.Printf("Stddev: %f", stddev)
 		log.Printf("Value: %f", (buckets[days[len(days)-1]]-mean)/stddev)
 
-		riemann.Send(&raidman.Event{
+		err = riemann.Send(&raidman.Event{
 			Time:    now.Unix(),
 			Service: service,
 			Metric:  metric,
+			Ttl:     ttl,
 		})
+		if err != nil {
+			log.Printf("Error: %s", err)
+		}
 	})
 }
 
@@ -174,6 +175,7 @@ func registerAggregator(
 	spec string,
 	command string,
 	service string,
+	ttl float32,
 ) {
 	schedule.AddFunc(spec, func() {
 		riemann, err := raidman.Dial("tcp", os.Getenv("RIEMANN_ADDRESS"))
@@ -233,11 +235,15 @@ func registerAggregator(
 		log.Printf("Stddev: %f", stddev)
 		log.Printf("Value: %f", (buckets[days[len(days)-1]]-mean)/stddev)
 
-		riemann.Send(&raidman.Event{
+		err = riemann.Send(&raidman.Event{
 			Time:    now.Unix(),
 			Service: service,
 			Metric:  metric,
+			Ttl:     ttl,
 		})
+		if err != nil {
+			log.Printf("Error: %s", err)
+		}
 	})
 }
 
